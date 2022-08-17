@@ -1,129 +1,140 @@
 module SamplingCubes
 
-using EarthDataLab
-using YAXArrays
+#=
+ Todo:
+ * config.toml
+ * correlation distance
+=#
+
+using Blosc, Zarr, YAXArrays
+Blosc.set_num_threads(Threads.nthreads())
+using DataFrames, Dates, CSV
 using GeoDatasets
-using Plots
 using Interpolations # for Constant Interpolation
-using Images
-using DataFrames
-using Dates: DateTime
-using CSV
+using Images, GLMakie
 using ProgressMeter
 
-global const CUBEPATH = Ref{String}()
-global const CSVPATH = Ref{String}()
+const global CUBEPATH = Ref{String}()
+const global CSVPATH = Ref{String}()
 
-global const EXTREMECUBES = Ref{Vector{YAXArray}}()
-global const EXTREMEDATAFRAME = Ref{DataFrame}()
+const global EXTREMECUBES = Ref{Vector{YAXArray}}()
+const global EXTREMEDATAFRAME = Ref{DataFrame}()
 
-export InitExtremes, GetExtremeEventData, GetExtremeEventCubes, GetEventCoordinates, GetEventLandSeaMask, GetMaskedEvent, GetSummedValues
+export InitExtremes, GetEvent, GetMaskedEvent, MakeT2mVideo
 
 function __init__()
-    gr()
-    CUBEPATH[] = "D:/deep_extremes/ERA5Data.zarr"
+    CUBEPATH[] = "D:/ERA5Data.zarr"
     CSVPATH[] = "src/EventPart1_csv_Ltime.csv"
 end
 
+"""
+    InitExtremes()
+
+This function initializes all the data and provides the Data
+"""
 function InitExtremes()
     # first the csv data
-    tempframe = CSV.read(CSVPATH[], DataFrame)
-    str_to_date(date) = DateTime(date, "yyyy.mm.dd")
-    tempframe[!, :when_from] = str_to_date.(tempframe[!, :when_from])
-    tempframe[!, :when_until] = str_to_date.(tempframe[!, :when_until])
-    EXTREMEDATAFRAME[] = tempframe
+    EXTREMEDATAFRAME[] = CSV.read(CSVPATH[], DataFrame, dateformat=dateformat"yyyy.mm.dd")
     # now the cubes
     fullcube = Cube(CUBEPATH[])
-    numcubes = size(EXTREMEDATAFRAME[], 1)
+    numcubes = nrow(EXTREMEDATAFRAME[])
     events = Vector{YAXArray}(undef, numcubes)
-    for index = 1:size(tempframe, 1)
-        time = (tempframe[index, :when_from], tempframe[index, :when_until])
-        longitude = Tuple(tempframe[index, [:where_W, :where_E]])
-        latitude = Tuple(tempframe[index, [:where_S, :where_N]])
-        events[index] = subsetcube(fullcube, lon=longitude, lat=latitude, time=time, Variable=["t2m", "t2mmin", "t2mmax"])
+    for index = 1:nrow(EXTREMEDATAFRAME[],)
+        time = (EXTREMEDATAFRAME[][index, :when_from], EXTREMEDATAFRAME[][index, :when_until])
+        longitude = Tuple(EXTREMEDATAFRAME[][index, [:where_W, :where_E]])
+        latitude = Tuple(EXTREMEDATAFRAME[][index, [:where_S, :where_N]])
+        events[index] = fullcube[longitude=longitude, latitude=latitude, time=time, Variable=["t2m"]]
     end
     EXTREMECUBES[] = events
-    return nothing
 end
 
-function GetExtremeEventData(event_idx)
-    return collect(EXTREMECUBES[][event_idx].data)
+# image(ev[:,:,1], axis = (aspect = DataAspect(), title = "Europe Drought",))
+
+"""
+    GetEvent(eventidx = 1, celsius = true)
+
+This function returns the t2m-data of the event `eventidx` as pure data, not `YAXArray`. Conversion to degree Celsius can be done as well.
+"""
+function GetEvent(eventidx=1, celsius=true)
+    if (celsius)
+        return collect(EXTREMECUBES[][eventidx].data)[:, :, :] .- 273.15
+    else
+        return collect(EXTREMECUBES[][eventidx].data)[:, :, :]
+    end
 end
 
-function GetExtremeEventCubes()
-    return EXTREMECUBES[]    
-end
+"""
+    GetEventLandSeaMask(event_idx)
 
-function GetEventCoordinates(event_idx)
-    dfr = EXTREMEDATAFRAME[][event_idx, :]
-    lons =  (dfr.where_W, dfr.where_E)
-    lats = (dfr.where_S, dfr.where_N)
-    return lons, lats
-end
-
+Returns a mask for the event of the same size as the cube. Sea and Lakes are considered as 0 and landmass as 1
+"""
 function GetEventLandSeaMask(event_idx)
     eventlons, eventlats = GetEventCoordinates(event_idx)
     lon, lat, data = GeoDatasets.landseamask(grid=1.25, resolution='f')
 
     data_lats = findall(x -> eventlats[1] <= x <= eventlats[2], lat)
     data_lons = findall(x -> eventlons[1] <= x <= eventlons[2], lon)
-    mask = imresize(data[data_lons, data_lats]', reverse(size(EXTREMECUBES[][event_idx])[1:2]), method=Constant())
+    mask = imresize(data[data_lons, data_lats], size(EXTREMECUBES[][event_idx])[1:2], method=Constant())
+    mask .= reverse(mask, dims=2)
     mask .= mask .> 0
     return mask
 end
 
-function GetMaskedEvent(event_idx::Int64; datapoint=1, normalize=true)
-    mask = GetEventLandSeaMask(event_idx)
-    data = collect(subsetcube(EXTREMECUBES[][event_idx],Variable="t2mmax").data)
-    if normalize
-        data .-= 273.15
-    end
-    data = reverse(data[:, :, datapoint], dims=2)'
-    return mask .* data
+"""
+    GetEventCoordinates(event_idx)
+
+Helper function for getting the coordinates of the event
+"""
+function GetEventCoordinates(event_idx)
+    dfr = EXTREMEDATAFRAME[][event_idx, :]
+    lons = (dfr.where_W, dfr.where_E)
+    lats = (dfr.where_S, dfr.where_N)
+    return lons, lats
 end
 
-function GetSummedValues(event_idx)
-    mask = GetEventLandSeaMask(event_idx)
-    data = collect(subsetcube(EXTREMECUBES[][event_idx], Variable="t2mmax").data)
-    data = dropdims(sum(data, dims=3), dims=3)
-    data = reverse(data, dims=2)'
-    mask .* data
-end
+"""
+    MakeT2mVideo(event_idx)
 
-function ShowCubeHistogram
-end
+This function creates a video for the extreme event `event_idx` and stores it as mp4 in the results directory
+"""
+function MakeT2mVideo(event_idx)
+    cube = EXTREMECUBES[][event_idx]
+    # get lat/lon coordinates as string for axes
+    x = [string(idx) for idx in cube.longitude.values]
+    y = [string(idx) for idx in cube.latitude.values]
 
-function ShowSamplingCube
-end
-
-function t2mmax_video(event_idx)
-    mask = GetEventLandSeaMask(event_idx)
-    tempcube = subsetcube(EXTREMECUBES[][event_idx], Variable="t2mmax")
-    x = [string(idx) for idx in tempcube.longitude.values]
-    y = [string(idx) for idx in tempcube.latitude.values]
-
-    dfr = EXTREMEDATAFRAME[][event_idx,:]
+    dfr = EXTREMEDATAFRAME[][event_idx, :]
     eventname = dfr."Name"
     eventtype = dfr."Event type"
     eventyear = dfr."Year"
 
-    datamax = maximum(collect(tempcube.data)) - 273.15
-    datamin = minimum(collect(tempcube.data)) - 273.15
+    # collect data
+    mask = GetEventLandSeaMask(event_idx)
+    data = GetEvent(event_idx) .* mask
 
-    animation = Animation()
+    # get min and max data for axis
+    datamax = maximum(data)
+    datamin = minimum(data)
+    longitudevalues = collect(cube.longitude.values)
+    latitudevalues = collect(cube.latitude.values)
 
-    @showprogress for timepoint in tempcube.time.values
-        titlestring = eventname*"-"*eventtype*"-"*string(Date(timepoint))
-        data = reverse(collect(tempcube[time=timepoint].data) .- 273.15, dims=2)'
-        data .= mask .* data
-        plot = heatmap(x, y, data,
-            title=titlestring,
-            clim=(datamin, datamax),
-        )
-        frame(animation)
+    # construct initial heatmap at timepoint 1
+    fig, ax, hm = heatmap(
+        longitudevalues, latitudevalues, data[:, :, 1],
+        colorrange=(datamin, datamax),
+    )
+    ax.title = eventname * "-" * eventtype * "-" * string(Date(cube.time.values[1]))
+    Colorbar(fig[:, end+1], hm)
+
+    filename = "./results/" * eventname * "-" * eventtype * "-" * string(eventyear) * ".mp4"
+
+    # loop through all time-points in 2D time-series beginning at idx 2
+    timepoints = range(2, size(data, 3))
+    record(fig, filename, timepoints; framerate=10) do timepoint
+        hm[3][] = data[:, :, timepoint]
+        ax.title = eventname * "-" * eventtype * "-" * string(Date(cube.time.values[timepoint]))
     end
 
-    gif(animation, "./results/"*eventname*"-"*eventtype*"-"*string(eventyear)*".gif", fps=5)
 end
 
 end # module
