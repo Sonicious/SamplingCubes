@@ -3,7 +3,6 @@ module SamplingCubes
 #=
  Todo:
  * config.toml
- * correlation distance
 =#
 
 using Blosc, Zarr, YAXArrays
@@ -11,21 +10,26 @@ Blosc.set_num_threads(Threads.nthreads())
 using DataFrames, Dates, CSV
 using GeoDatasets
 using Interpolations # for Constant Interpolation
-using Images, GLMakie
+using Images, GLMakie, Colors, ColorSchemes # everything plotting related
+using GeometryBasics
 using ProgressMeter
+using Distances, EnergyStatistics # for distances and/or dcor
+using Statistics, StatsBase
 
 const global CUBEPATH = Ref{String}()
 const global CSVPATH = Ref{String}()
-
 const global EXTREMECUBES = Ref{Vector{YAXArray}}()
 const global EXTREMEDATAFRAME = Ref{DataFrame}()
 
 export InitExtremes, GetEvent, GetMaskedEvent, MakeT2mVideo
+export GetDataFrame, GetFilteredEvent, GetCubes
 
 function __init__()
     CUBEPATH[] = "D:/ERA5Data.zarr"
     CSVPATH[] = "src/EventPart1_csv_Ltime.csv"
 end
+
+include("Voronoi.jl")
 
 """
     InitExtremes()
@@ -46,6 +50,25 @@ function InitExtremes()
         events[index] = fullcube[longitude=longitude, latitude=latitude, time=time, Variable=["t2m"]]
     end
     EXTREMECUBES[] = events
+    return nothing
+end
+
+"""
+    GetDataFrame()
+
+Returns the Dateframe of the extreme events 
+"""
+function GetDataFrame()
+    return EXTREMEDATAFRAME[]
+end
+
+"""
+    GetCubes()
+
+Returns the Dateframe of the extreme events 
+"""
+function GetCubes()
+    return EXTREMECUBES[]
 end
 
 # image(ev[:,:,1], axis = (aspect = DataAspect(), title = "Europe Drought",))
@@ -61,6 +84,19 @@ function GetEvent(eventidx=1, celsius=true)
     else
         return collect(EXTREMECUBES[][eventidx].data)[:, :, :]
     end
+end
+
+"""
+    GetFilteredEvent(eventidx=1, celsius=true)
+
+This function gives the first difference time series of an event in either Kelvin or Celsius
+"""
+function GetFilteredEvent(eventidx=1, celsius=true)
+    data = GetEvent(eventidx, celsius)
+    for datapoints = 1:size(data, 3)-1 # iterate along time axis
+        data[:, :, datapoints] .-= data[:, :, datapoints+1]
+    end
+    return data[:,:,1:end-1]
 end
 
 """
@@ -98,17 +134,12 @@ end
 This function creates a video for the extreme event `event_idx` and stores it as mp4 in the results directory
 """
 function MakeT2mVideo(event_idx)
+    # collect data and prepare strings
     cube = EXTREMECUBES[][event_idx]
-    # get lat/lon coordinates as string for axes
-    x = [string(idx) for idx in cube.longitude.values]
-    y = [string(idx) for idx in cube.latitude.values]
-
     dfr = EXTREMEDATAFRAME[][event_idx, :]
     eventname = dfr."Name"
     eventtype = dfr."Event type"
     eventyear = dfr."Year"
-
-    # collect data
     mask = GetEventLandSeaMask(event_idx)
     data = GetEvent(event_idx) .* mask
 
