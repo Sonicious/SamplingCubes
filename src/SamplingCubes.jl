@@ -7,11 +7,12 @@ using Images, GLMakie, Colors, ColorSchemes # everything plotting related
 using Statistics, StatsBase
 
 const global CUBEPATH = Ref{String}()
-const global LSMPATH = Ref{String}()
 const global CUBE = Ref{YAXArray}()
-const global LSMCUBE = Ref{YAXArray}()
 
 """
+    __init__
+
+initializes the cubes which are empty from the beginning
 """
 function __init__()
     # Getting roughly Europe
@@ -19,16 +20,20 @@ function __init__()
     arealatitude = (35, 65)
     CUBEPATH[] = "D:/ERA5Data.zarr"
     CUBE[] = Cube(CUBEPATH[])
-    LSMPATH[] = "D:/land_mask.zarr"
-    LSMCUBE[] = Cube(LSMPATH[])
     CUBE[] = CUBE[][longitude=arealongitude, latitude=arealatitude, Variable=["t2m"]]
-    LSMCUBE[] = LSMCUBE[][lon=arealongitude, lat=arealatitude]
+    lon, lat, data = GeoDatasets.landseamask(grid=1.25, resolution='f')
+    data_lons = findall(x -> arealongitude[1] <= x <= arealongitude[2], lon)
+    data_lats = findall(x -> arealatitude[1] <= x <= arealatitude[2], lat)
+    mask = imresize(data[data_lons, data_lats], size(CUBE[])[1:2], method=Constant())
+    mask .= reverse(mask, dims=2)
+    mask .= mask .> 0
+    const global LSM = mask
 end
 
 """
 """
 function initialPoints(strategy::String, lsm::Bool, value)
-    landpositions = Point2f[]
+    initialpositions = Point2f[]
     if strategy == "random"
         randompoints = value
         if lsm
@@ -36,7 +41,7 @@ function initialPoints(strategy::String, lsm::Bool, value)
                 while true
                     newpoint = (sample(lonSize, 1)..., sample(latSize, 1)...)
                     if mask[newpoint...] > 0
-                        push!(landpositions, Point2f(longitudevalues[newpoint[1]], latitudevalues[newpoint[2]]))
+                        push!(initialpositions, Point2f(longitudevalues[newpoint[1]], latitudevalues[newpoint[2]]))
                         break
                     end 
                 end
@@ -45,7 +50,7 @@ function initialPoints(strategy::String, lsm::Bool, value)
             for i in 1:randompoints
                 newpoint = (sample(lonSize, 1)..., sample(latSize, 1)...)
                 if mask[newpoint...] > 0
-                    push!(landpositions, Point2f(longitudevalues[newpoint[1]], latitudevalues[newpoint[2]]))
+                    push!(initialpositions, Point2f(longitudevalues[newpoint[1]], latitudevalues[newpoint[2]]))
                     break
                 end 
             end
